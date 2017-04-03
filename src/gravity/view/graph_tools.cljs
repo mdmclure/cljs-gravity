@@ -8,6 +8,7 @@
 (defn fill-window!
   "Resize a canvas to make it fill the window"
   [canvas]
+  (.log js/console "fill window")
   (set! (-> canvas .-style .-width) "100%")
   (set! (-> canvas .-style .-height) "100%")
   (let [width (.-offsetWidth canvas)
@@ -42,7 +43,7 @@
 (defn- get-background
   "Generate a gray sphere as a background"
   []
-  (let [material (new js/THREE.MeshLambertMaterial #js {:color 0xa0a0a0
+  (let [material (new js/THREE.MeshLambertMaterial #js {:color 0xffffff
                                                        ;:ambiant  0xffffff
                                                        :side 1})
         geometry (new js/THREE.SphereGeometry 20 20 20)

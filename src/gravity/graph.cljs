@@ -12,13 +12,13 @@
 
 
 (def default-parameters {:color (.category10 js/d3.scale)
-												 :worker-path "./gravity-worker.js"
-												 :stats false
+                         :worker-path "./gravity-worker.js"
+                         :stats false
                          :force {:size [1 1 1]
                                  :linkStrength 1
                                  :friction 0.9
                                  :linkDistance 20
-                                 :charge -30
+                                 :charge 0
                                  :gravity 0.1
                                  :theta 0.8
                                  :alpha 0.1}
@@ -69,8 +69,8 @@
                          set-links (:links graph)
                          update-force (:updateForce graph)
 
-                         nodes (clj->js [{:name "foo" :group 0} {:name "bar" :group 1}])
-												 links (clj->js [{:source 0 :target 1}])]
+                         nodes (clj->js {"foo" {:name "foo" :group 0} "bar" {:name "bar" :group 1}})
+                         links (clj->js [{:source "foo" :target "foo"}])]
                      (set-nodes nodes)
                      (set-links links)
                      (update-force)
@@ -101,13 +101,12 @@
 
 
 (defn- main
-
+  
   ([user-map]
    (let [graph (main user-map false)]
      (clj->js graph)))
 
   ([user-map dev-mode]
-
    (let [chan-out (events/create-chan)
          store (events/create-store)
          graph (graph/create user-map chan-out dev-mode)  ;; <--
@@ -162,8 +161,8 @@
 	(let [user-map (js->clj user-map :keywordize-keys true)
 				params (init-parameters user-map)
 				state (if (:stats user-map)
-								(merge user-map params {:stats (tools/make-stats)})
-								(merge user-map params))
+                                        (merge user-map params {:stats (tools/make-stats)})
+                                        (merge user-map params))
 
 				graph (main state false)]
 		(clj->js graph)))

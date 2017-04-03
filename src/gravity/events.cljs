@@ -82,6 +82,7 @@
 						 original-event (:original-event event)]
          (case (:type event)
            :ready (trigger :ready store)
+           :stable (trigger :stable store node)
            :node-over (do
                             (swap! state assoc :target node)
                             (trigger :node-over store node original-event))

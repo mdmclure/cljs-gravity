@@ -14,7 +14,8 @@
   "Callback for the window-resize event"
   [canvas renderer camera]
   (fn []
-     (tools/fill-window! canvas)
+    (.log js/console "on window resize")
+    ;;(tools/fill-window! canvas)
      (let [width (.-width canvas)
            height (.-height canvas)]
        (set! (.-aspect camera) (/ width height))
@@ -31,28 +32,31 @@
   "Cast a ray to intersect objects under the mouse pointer.
   Return the first intersected or nil"
   [event canvas camera raycaster objects]
-  (when-not (or (nil? objects) (empty? objects))
-    (let [scene-width (.-width canvas)
-          scene-height (.-height canvas)
-          mouse-pos (new js/THREE.Vector3)
-          bounding-rect (.getBoundingClientRect canvas)
-          x (-> (.-clientX event)
-                (- (.-left bounding-rect))
-                (/  scene-width);;(.-offsetWidth canvas))
-                (* 2)
-                (- 1))
-          y (-> (.-clientY event)
-                (- (.-top bounding-rect))
-                (-)
-                (/ scene-height);;(.-offsetHeight canvas))
-                (* 2)
-                (+ 1))
-          cam-position (.-position camera)]
-      (.set mouse-pos x y 1)
-      (.unproject mouse-pos camera)
-      (.set raycaster cam-position (.normalize (.sub mouse-pos cam-position)))
-      ;;return
-      (first (.intersectObjects raycaster objects)))))
+  (let [scene-width (.-width canvas)
+        scene-height (.-height canvas)
+        mouse-pos (new js/THREE.Vector3)
+        bounding-rect (.getBoundingClientRect canvas)
+        x (-> (.-clientX event)
+              (- (.-left bounding-rect))
+              (/  scene-width);;(.-offsetWidth canvas))
+              (* 2)
+              (- 1))
+        y (-> (.-clientY event)
+              (- (.-top bounding-rect))
+              (-)
+              (/ scene-height);;(.-offsetHeight canvas))
+              (* 2)
+              (+ 1))
+        cam-position (.-position camera)]
+    (.set mouse-pos x y 1)
+    (.unproject mouse-pos camera)
+    (.set raycaster cam-position (.normalize (.sub mouse-pos cam-position)))
+    ;;return
+    {:target (when-not (or (nil? objects) (empty? objects))
+               (first (.intersectObjects raycaster objects)))
+     :in-bounds? (and (> x -1) (< x 1)
+                      (> y -1) (< y 1))}
+    ))
 
 
 
@@ -63,30 +67,35 @@
   "Callback for the mouseMove event on the canvas node"
   [event canvas camera raycaster state chan events-state controls intersect-plane]
   (let [colliders (:meshes @state)
-        target (get-target event canvas camera raycaster colliders)]
-    (if-not (nil? target)
-      (let [node (.-node (.-object target))]
-        ;; disable controls
+        last-state (:last @events-state)
+        {target :target
+         in-bounds? :in-bounds?} (get-target event canvas camera raycaster colliders)]
+    ;(.log js/console "Move target " target " in-bounds? " in-bounds?)
+    (if-not in-bounds?
+      (when-not (= :out-of-bounds last-state) 
         (set! (-> controls .-enabled) false)
-        ;; move plane
-        (.copy (-> intersect-plane .-position) (-> node .-position))
-        (.lookAt intersect-plane (-> camera .-position))
-        ;; send event to the user
-        (when-not (= :node-over (:last @events-state))
-          (swap! events-state assoc :last :node-over)
-          (go
-           (>! chan {:type :node-over
-                     :target node
-										 :original-event event}))))
-      ;else
-      (when (or
-             (= :node-over (:last @events-state))
-             (= :drag (:last @events-state))
-             (= :up (:last @events-state)))
-        (set! (-> controls .-enabled) true)
-        (swap! events-state assoc :last :blur)
-        (go (>! chan {:type :node-blur
-											:original-event event}))))))
+        (swap! events-state assoc :last :out-of-bounds))
+      ;; else (when in-bounds)
+        (if-not (nil? target)
+          (let [node (.-node (.-object target))]
+            ;; disable controls
+            (set! (-> controls .-enabled) false)
+            ;; move plane
+            (.copy (-> intersect-plane .-position) (-> node .-position))
+            (.lookAt intersect-plane (-> camera .-position))
+            ;; send event to the user
+            (when-not (= :node-over last-state)
+              (swap! events-state assoc :last :node-over)
+              (go
+                (>! chan {:type :node-over
+                          :target node
+                          :original-event event}))))
+          ;; else (not over anything)
+          (when (contains? #{:node-over :drag :up :out-of-bounds} last-state)
+            (set! (-> controls .-enabled) true)
+            (swap! events-state assoc :last :blur)
+            (go (>! chan {:type :node-blur
+                          :original-event event})))))))
 
 
 (defn- click
@@ -94,8 +103,9 @@
   [event canvas camera raycaster state chan]
   (log "click")
   (let [colliders (:meshes @state)
-        target (get-target event canvas camera raycaster colliders)]
-    (when-not (nil? target)
+        {target :target
+         in-bounds? :in-bounds} (get-target event canvas camera raycaster colliders)]
+    (when (and in-bounds? target)
       (let [node (-> target .-object .-node)]
         (go (>! chan {:type :node-click
                       :target node
@@ -108,7 +118,8 @@
   [event canvas camera raycaster state chan]
 
   (let [colliders (:meshes @state)
-        target (get-target event canvas camera raycaster colliders)]
+        {target :target
+         in-bounds? :in-bounds} (get-target event canvas camera raycaster colliders)]
     (when-not (nil? target)
       (let [node (.-node (.-object target))]
         (go (>! chan {:type :node-dbl-click
@@ -122,15 +133,17 @@
 
 (defn- drag
   [event canvas camera raycaster events-state intersect-plane force-worker chan-out]
+  "MODIFIED: now done by id rather than index"
   (let [node (:target @events-state)]
     (when-not (nil? node)
       (let [node (-> node .-object)
-            index (-> node .-node .-index)
-            intersect (get-target event canvas camera raycaster (array intersect-plane))]
+            id (-> node .-node :id)
+            {intersect :target
+             in-bounds? :in-bounds} (get-target event canvas camera raycaster (array intersect-plane))]
         (when-not (nil? intersect)
           ;;(.copy (-> node .-position) (-> intersect .-point))
-          (force/send force-worker :set-position {:index index
-                                                  :position (-> intersect .-point)})
+          (force/send force-worker :set-position (clj->js {:id id
+                                                           :position (-> intersect .-point)}))
           (when (= :down (:last @events-state))
             (force/send force-worker "stop")
             (go (>! chan-out {:type :drag-start
@@ -145,7 +158,8 @@
 (defn- down
   [event canvas camera raycaster state events-state force-worker]
   (let [colliders (:meshes @state)
-        target (get-target event canvas camera raycaster colliders)]
+        {target :target
+         in-bounds? :in-bounds} (get-target event canvas camera raycaster colliders)]
     (when-not (nil? target)
       (force/send force-worker "stop")
       (swap! events-state assoc :last :down)
@@ -172,6 +186,9 @@
   [chan]
   (go (>! chan {:type :ready})))
 
+(defn notify-user-stable
+  [chan nodes]
+  (go (>! chan {:type :stable :target nodes})))
 
 
 

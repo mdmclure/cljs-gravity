@@ -5,7 +5,9 @@
 
 (ns gravity.force.worker
   (:refer-clojure :exclude [str force])
-  (:import [goog.object]))
+  (:import [goog.object])
+  (:require [clojure.set :as set]
+            [clairvoyant.core :as trace :include-macros true]))
 
 (defn answer
   "Post a message back"
@@ -46,35 +48,50 @@
 
 (def force (atom nil))
 (def parameters (atom nil))
+(def id-index-map (atom nil))
+
+(defn id->index [id]
+  (get @id-index-map id))
+
+(defn index->id [index]
+  (get (set/map-invert @id-index-map) index))
+
+(defn id->force-node [id]
+  (aget (.nodes @force)
+        (id->index id)))
 
 ;; --------------------------------
 
 
 
-
 (defn tick
-  "Tick function for the force layout"
+  "Tick function for the force layout.
+  MODIFIED: For each node, we also insert the id into
+  the typed array being sent back to the "
   [_]
   (let [nodes (.nodes @force)
         size (.-length nodes)]
     ;;(log [(first nodes)])
     (when (> size 0)
-      (let [arr (new js/Float32Array (* size 3))
+      (let [arr (new js/Float32Array (* size 4))
             buffer (.-buffer arr)]
         (loop [i 0]
-          (let [j (* i 3)
+          (let [j (* i 4)
                 node (aget nodes i)]
-            (aset arr j (.-x node))
-            (aset arr (+ j 1) (.-y node))
+            (aset arr j (index->id i))
+            (aset arr (+ j 1) (.-x node))
+            (aset arr (+ j 2) (.-y node))
             (if (js/isNaN (.-z node))
-              (aset arr (+ j 2) 0)
-              (aset arr (+ j 2) (.-z node))))
+              (aset arr (+ j 3) 0)
+              (aset arr (+ j 3) (.-z node))))
           (when (< i (dec size))
             (recur (inc i))))
-
         (answer {:type "nodes-positions" :data arr} [buffer])))))
 
-
+(defn end
+  "End function for the force layout"
+  [_]
+  (answer {:type "end"}))
 
 
 
@@ -104,26 +121,44 @@
                            (.alpha (:alpha params))
                            )]
     (.on force-instance "tick" tick)
+    (.on force-instance "end" end)
     force-instance))
 
 
-(defn- update-nodes-array
-  "Add or remove the correct amount of nodes and keep their positions"
-  [current-array nb-nodes]
-  (let [size (count current-array)]
-    (if (= size nb-nodes)
-      current-array
-      ;else
-      (if (< size nb-nodes)
-        (let [diff (- nb-nodes size)]
-          (doseq [i (range 0 diff)]
-            (.push current-array #js {}))
-          current-array)
-        ;else (> size nb-nodes)
-        (let [diff (- size nb-nodes)]
-          (.splice current-array nb-nodes diff)
-          current-array)))))
+(defn- make-force-nodes
+  "Add or remove the correct amount of nodes and keep their positions.  MODIFIED: Build the mapping from id->index for links"
+  [nodes]
+  (let [size (.-length nodes)
+        force-nodes (array)]
+    (when (> size 0)
+      (reset! id-index-map)
+      (loop [i 0]
+        (let [node (aget nodes i)
+              id (.-id node)]
+          (swap! id-index-map assoc id i)
+          (if (.-position node)
+            (.push force-nodes (.-position node))
+            (.push force-nodes {})))
+        (when (< i (dec size))
+          (recur (inc i)))))
+    force-nodes))
 
+ 
+(defn- make-force-links [links]
+  (let [size (.-length links)
+        force-links (array)]
+    (when (> size 0)
+      (loop [i 0]
+        (let [link (aget links i)
+              source-id (.-source link)
+              target-id (.-target link)
+              sim (aget link "similarity")
+              source-index (id->index source-id)
+              target-index (id->index target-id)]
+          (.push force-links (clj->js {:source source-index :target target-index :similarity sim})))
+        (when (< i (dec size))
+          (recur (inc i)))))
+    force-links))
 
 
 (defn start
@@ -145,15 +180,12 @@
     (.resume @force)))
 
 (defn set-nodes
-  "Set the nodes list"
-  [nb-nodes]
+  "Set the nodes list.  nodes should be a js array"
+  [nodes]
   (stop)
   (let [new-force (make-force)
-        nodes (if-not (nil? @force)
-                (.nodes @force)
-                (array))
-        nodes (update-nodes-array nodes nb-nodes)]
-    (.nodes new-force nodes)
+        force-nodes (make-force-nodes nodes)]
+    (.nodes new-force force-nodes)
     (reset! force new-force)
     (start)))
 
@@ -163,8 +195,9 @@
   [links]
   (stop)
   (when-not (nil? @force)
-    (.links @force links)
-    (start)))
+    (let [force-links (make-force-links links)]
+      (.links @force force-links)
+      (start))))
 
 
 (defn precompute
@@ -185,15 +218,12 @@
 
 
 
-
-
-
 (defn set-position
   "Set a node's position"
   [data]
-  (let [index (-> data .-index)
+  (let [id (-> data .-id)
         position (-> data .-position)
-        node (aget (.nodes @force) index)
+        node (id->force-node id)
         alpha (.alpha @force)]
 
     (stop)
@@ -215,20 +245,18 @@
     (tick nil)
     ))
 
-
 (defn pin
-  "pin a node by index"
+  "pin a node by id"
   [data]
-  (let [index (-> data .-index)
-        node (aget (.nodes @force) index)]
+  (let [id (-> data .-id)
+        node (id->force-node id)]
     (set! (.-fixed node) true)))
 
-
 (defn unpin
-  "unpin a node by index"
+  "unpin a node by id"
   [data]
-  (let [index (-> data .-index)
-        node (aget (.nodes @force) index)]
+  (let [id (-> data .-id)
+        node (id->force-node id)]
     (set! (.-fixed node) false)))
 
 
@@ -259,7 +287,8 @@
       "size" (swap! parameters assoc :size (js->clj data))
       "linkStrength" (swap! parameters assoc :linkStrength (eval data))
       "friction" (swap! parameters assoc :friction data)
-      "linkDistance" (swap! parameters assoc :linkDistance (eval data))
+      "linkDistance" 
+      (swap! parameters assoc :linkDistance (eval data))
       "charge" (swap! parameters assoc :charge (eval data))
       "gravity" (swap! parameters assoc :gravity data)
       "theta" (swap! parameters assoc :theta data)
