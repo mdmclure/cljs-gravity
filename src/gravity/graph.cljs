@@ -2,9 +2,11 @@
   (:require [gravity.view.graph :as graph]
             [gravity.view.graph-tools :as tools]
             [gravity.events :as events]
-            [gravity.force.proxy :as worker]
-						[gravity.force.worker :as webworker]
-            [gravity.tools :refer [log]]))
+            [gravity.force.proxy :as force-worker]
+            [gravity.force.worker :as force-webworker]
+            [gravity.field.proxy :as field-worker]
+            [gravity.field.worker :as field-webworker]
+            [gravity.macros :refer-macros [log]]))
 
 (enable-console-print!)
 
@@ -12,7 +14,8 @@
 
 
 (def default-parameters {:color (.category10 js/d3.scale)
-                         :worker-path "./gravity-worker.js"
+                         :force-worker-path "./force-worker.js"
+                         :field-worker-path "./field-worker.js"
                          :stats false
                          :force {:size [1 1 1]
                                  :linkStrength 1
@@ -22,6 +25,10 @@
                                  :gravity 0.1
                                  :theta 0.8
                                  :alpha 0.1}
+                         :field {:scale 0
+                                 :base-density 10
+                                 :radius-ratio 2
+                                 :kernel "linear"}
                          :webgl {:antialias true
                                  :background false
                                  :lights true
@@ -149,8 +156,8 @@
         params (init-parameters user-map)
         state (merge dev-app-state user-map params)]
     (reset! app-state state)
-    (swap! app-state assoc :force-worker (worker/create "force-worker/worker.js" (:force state)))
-
+    (swap! app-state assoc :force-worker (force-worker/create "force-worker/worker.js" (:force state)))
+    (swap! app-state assoc :field-worker (field-worker/create "field-worker/worker.js" (:field state)))
     (clj->js
      (on-js-reload))))
 
@@ -167,4 +174,5 @@
 				graph (main state false)]
 		(clj->js graph)))
 
-(def ^:export create-worker gravity.force.worker/create)
+(def ^:export create-force-worker gravity.force.worker/create)
+(def ^:export create-field-worker gravity.field.worker/create)

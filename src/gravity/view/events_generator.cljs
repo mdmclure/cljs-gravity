@@ -1,7 +1,7 @@
 (ns gravity.view.events-generator
   "Events listeners on the canvas, mouse, etc…"
   (:require
-   [gravity.tools :refer [log]]
+   [gravity.macros :refer-macros [log warn err]]
    [gravity.view.graph-tools :as tools]
    [gravity.force.proxy :as force :refer [send]]
    [cljs.core.async :refer [chan >! <! put!  sliding-buffer]])
@@ -52,6 +52,7 @@
     (.unproject mouse-pos camera)
     (.set raycaster cam-position (.normalize (.sub mouse-pos cam-position)))
     ;;return
+    ;;(.log js/console "Get target x: " x " y " y)
     {:target (when-not (or (nil? objects) (empty? objects))
                (first (.intersectObjects raycaster objects)))
      :in-bounds? (and (> x -1) (< x 1)
@@ -74,8 +75,14 @@
     (if-not in-bounds?
       (when-not (= :out-of-bounds last-state) 
         (set! (-> controls .-enabled) false)
-        (swap! events-state assoc :last :out-of-bounds))
+        (swap! events-state assoc :last :out-of-bounds)
+        (.log js/console "OUT of bounds!")
+        )
       ;; else (when in-bounds)
+      (do
+        ;;(.log js/console "last state: " last-state)
+         (when (= last-state :out-of-bounds)
+           (.log js/console "IN bounds!"))
         (if-not (nil? target)
           (let [node (.-node (.-object target))]
             ;; disable controls
@@ -95,7 +102,7 @@
             (set! (-> controls .-enabled) true)
             (swap! events-state assoc :last :blur)
             (go (>! chan {:type :node-blur
-                          :original-event event})))))))
+                          :original-event event}))))))))
 
 
 (defn- click
@@ -129,7 +136,7 @@
 
 
 
-
+e
 
 (defn- drag
   [event canvas camera raycaster events-state intersect-plane force-worker chan-out]
@@ -202,7 +209,6 @@
   "Take chans with events from the dom and alt! them to generate meaningful events."
   [mouse-down mouse-up mouse-move]
   (let [timeout-time 350
-
         out-chan (chan 10)
         events-state (atom {})]
     (go-loop []
@@ -216,6 +222,7 @@
 
                      ;; We stay in this loop while the mouse move without mousedown
                      [mouse-move] ([transducted] (do
+                                                   ;;(.log js/console "mousemove detected")
                                                    (go (>! out-chan (merge {:type :move} transducted)))
                                                    (recur)))))
              (loop [nb-drags 0]

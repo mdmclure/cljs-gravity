@@ -1,7 +1,7 @@
 (ns gravity.events
-  (:require-macros [cljs.core.async.macros :refer [go]])
-  (:require [cljs.core.async :refer [<! >! chan]]
-            [gravity.tools :refer [log]]))
+  (:require-macros [cljs.core.async.macros :refer [go]]
+                   [gravity.macros :refer [log warn err]])
+  (:require [cljs.core.async :refer [<! >! chan]]))
 
 
 

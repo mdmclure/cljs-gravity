@@ -7,6 +7,7 @@
   (:refer-clojure :exclude [str force])
   (:import [goog.object])
   (:require [clojure.set :as set]
+            [gravity.macros :refer-macros [log-force warn-force]]
             [clairvoyant.core :as trace :include-macros true]))
 
 (defn answer
@@ -15,26 +16,6 @@
    	(.postMessage js/self (clj->js message)))
   ([message data]
   	(.postMessage js/self (clj->js message) (clj->js data))))
-
-
-
-
-(defn- get-args
-  "Return the first arg or all the list as a js-obj"
-  [coll]
-  (if (= (count coll) 1)
-    (clj->js (first coll))
-   	(clj->js coll)))
-
-(defn log
-  "Log in the console"
-  [args]
-  (.log js/console "[force.worker/log]: " (get-args args)))
-
-(defn warn
-  "Warn in the console"
-  [args]
-  (.warn js/console "[force.worker/warn]: " (get-args args)))
 
 (defn str
   [& args]
@@ -213,7 +194,7 @@
         (dotimes [i steps]
           (.tick @force))
         (.on @force "tick" tick)
-        (log (str "Pre-computed in " (/ (- (.now js/Date) start) 1000) "ms.")))
+        (log-force "Pre-computed in " (/ (- (.now js/Date) start) 1000) "ms."))
       )))
 
 
@@ -294,7 +275,7 @@
       "theta" (swap! parameters assoc :theta data)
       "alpha" (swap! parameters assoc :alpha data)
 
-      (warn (str "Unable to dispatch '" type "'")))))
+      (warn-force (str "Unable to dispatch '" type "'")))))
 
 
 ;; :size [1 1]

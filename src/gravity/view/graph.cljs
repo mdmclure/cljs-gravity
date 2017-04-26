@@ -1,11 +1,14 @@
 (ns gravity.view.graph
   (:require
-   [gravity.tools :refer [log trace-var vector-diff-js]]
+   [gravity.tools :refer [vector-diff-js map-map map-to-jsarray]]
    [gravity.view.node :as node]
    [gravity.view.nodeset :as points]
+   [gravity.macros :refer-macros [log warn err]]
    [gravity.view.graph-tools :as tools]
    [gravity.view.events-generator :as events]
-   [gravity.force.proxy :as worker]
+   [gravity.view.field :as field]
+   [gravity.force.proxy :as force-worker]
+   [gravity.field.proxy :as field-worker]
    [clojure.set :as set]
    [clairvoyant.core :as trace :include-macros true]))
 
@@ -29,22 +32,22 @@
     (set! (.-z (.-position camera)) 100)
 
     {:scene (new js/THREE.Scene)
-      :width width
-      :height height
-      :camera camera
-      :stats (:stats user-map)
-      :controls (new js/THREE.OrbitControls camera)
-      :renderer (new js/THREE.WebGLRenderer #js {:antialias (:antialias webgl-params)
-                                                 :canvas (:canvas user-map)})
-      :raycaster (new THREE.Raycaster)
-      :classifier (:color user-map)
-     :field-scale (or (:field-scale user-map) 0)
-      :force-worker (if (:force-worker user-map)
-                      (:force-worker user-map)
-                      (worker/create (:worker-path user-map) (:force user-map)))
-
+     :width width
+     :height height
+     :camera camera
+     :stats (:stats user-map)
+     :controls (new js/THREE.OrbitControls camera)
+     :renderer (new js/THREE.WebGLRenderer #js {:antialias (:antialias webgl-params)
+                                                :canvas (:canvas user-map)})
+     :raycaster (new THREE.Raycaster)
+     :classifier (:color user-map)
+     :force-worker (or (:force-worker user-map)
+                       (force-worker/create (:force-worker-path user-map) (:force user-map)))
+     :field-worker (or (:field-worker user-map)
+                       (field-worker/create (:field-worker-path user-map) (:field user-map)))
+     :field (:field user-map)
      :state (atom {:should-run true})
-      :first-run (:first-run user-map)}))
+     :first-run (:first-run user-map)}))
 
 
 
@@ -105,16 +108,47 @@
   "Send a resume event to the force worker"
   [force-worker]
   (fn []
-     (worker/send force-worker "resume")))
+     (force-worker/send force-worker "resume")))
 
+(defn- update-field-connected-components
+  [field-worker ccs]
+  (let [node-to-cc-map (atom {})
+        cc-node-map (map-map (fn [k v]
+                               (doseq [node-id (:nodes v)]
+                                 (swap! node-to-cc-map
+                                        assoc node-id k))
+                               v)
+                             ccs)
+        arr (map-to-jsarray @node-to-cc-map)]
+    (field-worker/send field-worker "set-node-fields" arr)))
+        
+(defn- build-cc-fields
+  [state field-worker base-density]
+  (let [ccs (:connected-components @state)]
+    (update-field-connected-components field-worker ccs)
+    (field/prepare-cc-meshes state base-density)))
 
+(defn- clear-cc-meshes
+  [ccs scene]
+  (doseq [[ccid cc] ccs]
+    (doseq [mesh (:meshes cc)]
+      (.remove scene mesh))))
+
+(defn- update-field-nodes
+  "Ask the field agent for an field update base on the new node positions"
+  [field-worker node-position-data]
+  (field-worker/send field-worker "set-training-data-3D" node-position-data))
 
 (defn- set-links
   "Remove the old links and add the new ones"
-  [state scene links]
+  [state scene field-worker links]
+  ;(log "Set links: " links (clj->js @state))
   (let [old-links (:links-set @state)
         nodes (:nodes @state)
-        new-links (points/create-links nodes links)
+        ccs (:connected-components @state)
+        base-density (get-in @state [:field :base-density])
+        {new-links :links
+         new-ccs :ccs} (points/create-links nodes links ccs)
         {added-links :only1
          removed-links :only2}
         (vector-diff-js links (:links @state) "id")]
@@ -122,11 +156,27 @@
     (.add scene new-links)
     (swap! state assoc :links links)
     (swap! state assoc :links-set new-links)
+    (swap! state assoc :connected-components new-ccs)
+    (build-cc-fields state field-worker base-density)
     added-links))
+
+(defn- build-singleton-ccs [nodes]
+  (let [ids (mapv #(.-id %) nodes)]
+    (zipmap ids (mapv (fn [id] {:nodes (hash-set id)}) ids))))
   
+(defn mark-as-training [state field-worker nodes]
+  (let [node-ids (map #(.-id %) nodes)
+        node-labels (map #(.-group %) nodes)
+        label-map (zipmap node-ids node-labels)
+        label-arr (map-to-jsarray label-map)]
+    (field-worker/send field-worker "set-training-labels" label-arr)
+    (swap! state assoc :training-nodes
+           (into #{} node-ids))))
+
 (defn- set-nodes
   "Remove the old nodes and add the new ones"
-  [state scene nodes]
+  [state scene field-worker nodes]
+  ;(log "Set nodes: " nodes (clj->js @state))
   (let [classifier (:classifier @state)
         old-nodes (:nodes @state)
         {added-nodes :only1
@@ -136,67 +186,55 @@
         {added-nodes :nodes
          added-meshes :meshes} (points/prepare-nodes added-nodes classifier)
         new-nodes (.concat reused-nodes added-nodes)
-        new-meshes (clj->js (mapv #(.-mesh %) new-nodes))]
+        new-meshes (clj->js (mapv #(.-mesh %) new-nodes))
+        ccs (build-singleton-ccs new-nodes)]
     (doseq [node removed-nodes]
+      ;(log "Removing mesh: " node (-> node .-mesh) scene)
       (.remove scene (-> node .-mesh)))
     (doseq [mesh added-meshes]
+      ;(log "Adding mesh: " mesh scene)
       (.add scene mesh))
-    (swap! state assoc :nodes new-nodes)
-    (swap! state assoc :meshes new-meshes)
-    (set-links state scene [])
+    (clear-cc-meshes (:connected-components @state) scene)
+    (swap! state #(-> %
+                      (assoc :nodes new-nodes)
+                      (assoc :meshes new-meshes)
+                      (assoc :connected-components ccs)))
+    ;;temporary: add all nodes to training
+    (mark-as-training state field-worker nodes)
+    ;(set-links state scene field-worker [])
     ;;By only returning the added nodes we send back a signal about whether there were any changes
     added-nodes))
 
-(defn- set-svms
-  "Remove the old svms and add the new ones"
-  [state scene force-worker svms]
-  (let [classifier (:classifier @state)]
-    (swap! state assoc :svms svms)
-    (when-not (:field @state)
-      (let [{field :field
-             meshes :meshes} (points/prepare-field)]
-        (doseq [field-mesh meshes]
-          (.add scene field-mesh))
-        (swap! state assoc :field field)))
-    (points/update-field! (:field @state) svms classifier (:field-scale @state) scene)
-    svms))
 
 (defn- set-field-scale
-  "Remove the old svms and add the new ones"
+  "Change the relative size of the field meshes"
   [state scene scale]
-  (swap! state assoc :field-scale scale)
-  (points/update-field-scale! (:field @state) scale scene))
+  (swap! state assoc-in [:field :scale] scale)
+  (field/update-field-scale! state scene scale))
 
 
 (defn- set-nodes-callback
   "Allow the user to replace nodes with a new set of nodes.
   MODIFIED: Maintain a clojurescript map to store the nodes internally.  Convert from js on input and to js on output."
-  [state scene]
+  [state scene field-worker]
   (fn [nodes]
     (if (nil? nodes)
       (:nodes @state)
-      (set-nodes state scene nodes))))
+      (set-nodes state scene field-worker nodes))))
 
 (defn- set-links-callback
-  [state scene]
+  [state scene field-worker]
   (fn [links]
     (if (nil? links)
       (:links @state)
-      (set-links state scene links))))
-
-(defn- set-svms-callback
-  [state scene force-worker]
-  (fn [svms]
-    (if (nil? svms)
-       (:svms @state)
-       (set-svms state scene force-worker svms))))
+      (set-links state scene field-worker links))))
 
 (defn- set-field-scale-callback
   [state scene]
   (fn [scale]
     (if (nil? scale)
-       (:field-scale @state)
-       (set-field-scale state scene scale))))
+      (get-in @state [:field :scale])
+      (set-field-scale state scene scale))))
 
 
 
@@ -205,12 +243,11 @@
   (fn []
     (let [nodes (:nodes @state)
           links (:links @state)]
-      (worker/send force-worker "set-nodes"
+      (force-worker/send force-worker "set-nodes"
                    (mapv #(clj->js {:id (.-id %)
                                     :position (.-position %)})
                          nodes))
-      (worker/send force-worker "set-links" links)
-      ;;(worker/send force-worker "start")
+      (force-worker/send force-worker "set-links" links)
       )))
 
 
@@ -219,13 +256,22 @@
 (defn init-force
   [force-worker dev-mode first-run]
   (when (and (not first-run) dev-mode)
-    (worker/send force-worker "tick")))
+    (force-worker/send force-worker "tick")))
 
+(defn notify-force-ready [state event-channel]
+  (swap! state assoc-in [:force :ready] true)
+  (when (get-in @state [:field :ready])
+    (events/notify-user-ready event-channel)))
+
+(defn notify-field-ready [state event-channel]
+  (swap! state assoc-in [:field :ready] true)
+  (when (get-in @state [:force :ready])
+    (events/notify-user-ready event-channel)))
 
 (defn create
   "Initialise a context in the specified element id"
   [user-map chan-out dev-mode]
-  (let [{	first-run :first-run
+  (let [{first-run :first-run
          scene :scene
          width :width
          height :height
@@ -236,8 +282,9 @@
          raycaster :raycaster
          classifier :classifier
          force-worker :force-worker
-         field-scale :field-scale
-         state :state} (get-components user-map dev-mode)
+         field-worker :field-worker
+         state :state
+         field :field} (get-components user-map dev-mode)
 
          canvas (if-not (nil? (:canvas user-map))
                   (:canvas user-map)
@@ -253,16 +300,16 @@
          ;;nodeset (points/create nodes classifier)
          ;;links-set (points/create-links nodes links)
          render (render-callback renderer scene camera stats state controls select-circle)]
-
+    
 
     ;;     (swap! state assoc :nodes nodes)
     ;;     (swap! state assoc :meshes meshes)
     ;;     (swap! state assoc :links links)
     ;;     (swap! state assoc :links-set links-set)
     (swap! state assoc :classifier classifier)
-    (swap! state assoc :field-scale field-scale)
     (swap! state assoc :select-circle select-circle)
     (swap! state assoc :meshes (array))
+    (swap! state assoc :field field)
 
 
     ;; renderer
@@ -276,24 +323,33 @@
 
 
 
-    (worker/listen force-worker (fn [event]
+    (force-worker/listen force-worker (fn [event]
                                   (let [message (.-data event)
                                         type (.-type message)
                                         data (.-data message)]
                                     (case type
-                                      "ready" (do
-                                                (init-force force-worker dev-mode first-run)
-                                                (events/notify-user-ready chan-out))
-                                      "end" (let [state @state]
-                                               (events/notify-user-stable chan-out (:nodes state)))
-                                      "nodes-positions" (let [state @state]
-                                                          (points/update-positions! (:nodes state) data)
+                                      "ready" (do (init-force force-worker dev-mode first-run)
+                                                  (notify-force-ready state chan-out))
+                                      "end" (events/notify-user-stable chan-out (:nodes @state))
+                                      "nodes-positions" (do
+                                                          (points/update-positions! (:nodes @state) data)
+                                                          ;;pass the node positions directly on to the field worker
+                                                          (when-not (:waiting-on-field? @state)
+                                                            (do (swap! state assoc :waiting-on-field? true)
+                                                                (update-field-nodes field-worker data)))
                                                           ;;(points/update nodeset)
-                                                          (points/update-geometry (:links-set state))
+                                                          (points/update-geometry (:links-set @state))
                                                           )))))
-
-
-
+    
+    (field-worker/listen field-worker (fn [event]
+                                        (let [message (.-data event)
+                                              type (.-type message)
+                                              data (.-data message)]
+                                          (case type
+                                            "ready" (notify-field-ready state chan-out)
+                                            "field-coordinate-predictions-3D"
+                                            (do (field/update-cc-meshes! state scene data)
+                                                (swap! state assoc :waiting-on-field? false))))))
 
     ;; if it's not the first time in dev mode
     (when (and (not first-run) dev-mode)
@@ -303,7 +359,7 @@
       (events/notify-user-ready chan-out))
 
 
-    ;;(worker/send force-worker "precompute" 50)
+    ;;(force-worker/send force-worker "precompute" 50)
 
     (.add scene select-circle)
     (set! (-> select-circle .-visible) false)
@@ -346,24 +402,24 @@
     {:start (start-callback! state render)
      :stop (stop-callback! state)
      :resume (resume-force-callback force-worker)
-     :tick (fn [] (worker/send force-worker "tick"))
+     :tick (fn [] (force-worker/send force-worker "tick"))
      :canvas (.-domElement renderer)
      :stats stats
-     :svms (set-svms-callback state scene force-worker)
-     :fieldScale (set-field-scale-callback state scene)
-     :nodes (set-nodes-callback state scene)
-     :links (set-links-callback state scene)
+     :nodes (set-nodes-callback state scene field-worker)
+     :links (set-links-callback state scene field-worker)
      :updateForce (update-force-callback state force-worker)
-
-     :force {:size           (fn [array] (worker/send force-worker "size" array))
-             :linkStrength   (fn [val] (worker/send force-worker "linkStrength" (worker/serialize val)))
-             :friction       (fn [val] (worker/send force-worker "friction" val))
-             :linkDistance   (fn [val] (worker/send force-worker "linkDistance" (worker/serialize val)))
-             :charge         (fn [val] (worker/send force-worker "charge" (worker/serialize val)))
-             :gravity        (fn [val] (worker/send force-worker "gravity" val))
-             :theta          (fn [val] (worker/send force-worker "theta" val))
-             :alpha          (fn [val] (worker/send force-worker "alpha" val))}
-
+     
+     :force {:size           (fn [array] (force-worker/send force-worker "size" array))
+             :linkStrength   (fn [val] (force-worker/send force-worker "linkStrength" (force-worker/serialize val)))
+             :friction       (fn [val] (force-worker/send force-worker "friction" val))
+             :linkDistance   (fn [val] (force-worker/send force-worker "linkDistance" (force-worker/serialize val)))
+             :charge         (fn [val] (force-worker/send force-worker "charge" (force-worker/serialize val)))
+             :gravity        (fn [val] (force-worker/send force-worker "gravity" val))
+             :theta          (fn [val] (force-worker/send force-worker "theta" val))
+             :alpha          (fn [val] (force-worker/send force-worker "alpha" val))}
+     ;;  field closures
+     :field {:scale (set-field-scale-callback state scene)
+             }
      :selectNode (fn [node-id]
                    (let [node (node-id (:nodes @state))]
                      (swap! state assoc :selected node)
@@ -374,13 +430,13 @@
                       mesh (:mesh node)]
                   (set! (-> mesh .-circle) circle)
                   (.add mesh circle))
-                (worker/send force-worker "pin" {:id node-id}))
+                (force-worker/send force-worker "pin" {:id node-id}))
      :unpinNode (fn [node-id]
                   (let [node (node-id (:nodes @state))
                         mesh (:mesh node)]
                     (tools/remove-children mesh)
                     (.remove mesh (.-circle mesh))
-                    (worker/send force-worker "unpin" {:id node-id})))
+                    (force-worker/send force-worker "unpin" {:id node-id})))
      :camera camera
      }))
 

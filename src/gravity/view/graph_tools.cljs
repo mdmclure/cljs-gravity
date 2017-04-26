@@ -1,8 +1,6 @@
 (ns gravity.view.graph-tools
   "Contain tools like selection animation, lights, background, etc…"
-
-  (:require [gravity.tools :refer [log]]))
-
+  (:require [gravity.macros :refer-macros [log warn err]]))
 
 
 (defn fill-window!
@@ -63,7 +61,7 @@
 (defn- get-spot-lights
   []
   (let [color (new js/THREE.Color 0xffffff)
-        strength   0.8
+        strength   1.0
         shadow-map 2048
         positions [[-1000 1000 1000]
                    [1000 1000 1000]

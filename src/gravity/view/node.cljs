@@ -1,7 +1,8 @@
 (ns gravity.view.node
   (:require
    ;[clairvoyant.core :as trace :include-macros true]
-   [gravity.tools :refer [log err]]))
+   [gravity.macros :refer-macros [log warn err]]
+   [clairvoyant.core :as trace :include-macros true]))
 
 
 
@@ -19,9 +20,9 @@
 (defn get-rand-pos
   "Give a random position between -extent and +extent"
   [extent]
-	(-> (* 2 extent)
-			(rand)
-			(- extent)))
+  (-> (* 2 extent)
+      (rand)
+      (- extent)))
 
 (defn generate-cube-geometry
   "Generate a generic geometry"
@@ -60,7 +61,6 @@
     (.set (.-scale sphere) 0.3 0.3 0.3)
     sphere))
 
-
 (defn create
   "Return a cloned node with a random position and a collider object"
   [node classifier]
@@ -80,24 +80,3 @@
     node))
 
 
-(defn generate-coord-mesh
-  "create and return a new node mesh used for collisions"
-  [coord]
-  (let [geometry (get-unique-cube-geometry)
-        material (get-unique-material (str 'black))
-        sphere (new js/THREE.Mesh geometry material)]
-    (.set (.-scale sphere) 0.1 0.1 0.1)
-    (.set (.-position sphere)
-          (nth coord 0) (nth coord 1) (nth coord 2))
-    sphere))
-
-(defn create-field-pt
-  [coord]
-  (let [field-mesh (generate-coord-mesh coord)
-        field-pt (clj->js {})]
-    (set! (.-co field-pt) (clj->js coord))
-    (set! (.-mesh field-pt) field-mesh)
-    (set! (.-castShadow field-mesh) false)
-    (set! (.-fieldpt field-mesh) field-pt)
-;    (log field-pt)
-    field-pt))

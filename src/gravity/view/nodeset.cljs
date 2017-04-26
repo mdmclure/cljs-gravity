@@ -1,8 +1,8 @@
 (ns gravity.view.nodeset
   (:refer-clojure :exclude [update])
-  (:require [gravity.tools :as tools]
+  (:require [gravity.macros :refer-macros [log warn err]]
             [gravity.view.node :as node]
-            [clojure.set :as set]
+            [clojure.set :refer [union]]
             [clairvoyant.core :as trace :include-macros true]
             ))
 
@@ -21,28 +21,61 @@
             (recur (inc i))))
         @found))))
 
+(defn merge-ccs
+  "merge two connected components in the map"
+  [ccs ccid1 ccid2]
+  (let [node-set1 (get-in ccs [ccid1 :nodes])]
+    (-> ccs
+        (update-in [ccid2 :nodes] union node-set1)
+        (dissoc ccid1))))
+
+(defn node-to-cc-map
+  [ccs]
+  (reduce (fn [result [ccid cc]]
+            (into result
+                  (map (fn [node-id] [node-id ccid]) (:nodes cc))))
+          {} ccs))
+
+
 (defn create-links
-  "Given a js-array of nodes and a js array of links, will return a THREE.LineSegments."
-  [nodes links]
+  "Given a js-array of nodes and a js array of links, will return a THREE.LineSegments.  Also updates connected components in this pass to be efficient"
+  [nodes links ccs]
+  ;(log "Create Links " (clj->js ccs))
   (let [geometry (new js/THREE.Geometry)
         vertices (.-vertices geometry)
         material (new js/THREE.LineBasicMaterial #js {"color" 0x000000})
-        system (new js/THREE.LineSegments geometry material)]
-    (doseq [link links]
-      (let [source (id->node (.-source link) nodes)
-            target (id->node (.-target link) nodes)]
-        (.push vertices (.-position source))
-        (.push vertices (.-position target))))
+        system (new js/THREE.LineSegments geometry material)
+        new-ccs (reduce (fn [ccs link]
+                          (let [source (id->node (.-source link) nodes)
+                                target (id->node (.-target link) nodes)
+                                node-to-cc (node-to-cc-map ccs)
+                                source-cc (get node-to-cc (.-source link))
+                                target-cc (get node-to-cc (.-target link))]
+                            ;(log "Link Source: " source-cc source "Target: " target-cc target)
+                            ;;side effect: build line segment geometry  
+                            (.push vertices (.-position source))
+                            (.push vertices (.-position target))
+                            ;;if the link connects two distinct ccs, merge them
+                            (if (not= source-cc target-cc)
+                              (let [high (max source-cc target-cc)
+                                    low (min source-cc target-cc)]
+                                ;(log "Merge high " high " into low " low)
+                                ;; always merge the high into the low
+                                (merge-ccs ccs high low))
+                              ccs)))
+                        ccs links)]
     (set! (.-verticesNeedUpdate geometry) true)
     (set! (.-castShadow system) true)
-    system))
-
-
+    ;(log "Created Links " system (clj->js new-ccs))
+    {:links system
+     :ccs new-ccs}))
+ 
 (defn prepare-nodes
   "Create a array of cloned nodes containing a position and a collider object.
   Return a map {nodes[] colliders[]} meant to be destructured.
   The nodes and the colliders are in the same order and share the same position Vector3."
   [nodes classifier]
+  ;(log "Prepare nodes " nodes)
   (let [pairs (map (fn [node]
                      (let [prepared-node (node/create node classifier)
                            mesh (.-mesh prepared-node)]
@@ -82,104 +115,3 @@
       ;;@new-nodes ;not needed
       )))
 
-
-
-
-
-; Field stuff
-
-(defn cart [colls]
-  (if (empty? colls)
-    '(())
-    (for [x (first colls)
-          more (cart (rest colls))]
-      (cons x more))))
-
-(defn sum-of-squares [coord]
-  (.sqrt js/Math 
-          (+ (.pow js/Math (nth coord 0) 2)
-             (.pow js/Math (nth coord 1) 2)
-             (.pow js/Math (nth coord 2) 2))))
-
-
-(defn prepare-field
-  "Generate a grid of field-point objects."
-  []
-  (let [radius 100
-        resolution 25
-        span (map #(-> (- % (/ resolution 2))
-                       (* (/ (* 2 radius) resolution)))
-                  (range (+ 1 resolution)))
-        cube-coords (cart [span, span, span])
-        sphere-coords (for [coord cube-coords
-                                 :let [r (sum-of-squares coord)]
-                                 :when (<= r radius)]
-                             (vec coord))
-        pairs (map (fn [coord]
-                     (let [field-pt
-                           (node/create-field-pt coord)
-                           mesh (.-mesh field-pt)]
-                       [field-pt mesh]))
-                   sphere-coords)]
-    {:field (clj->js (mapv first pairs))
-     :meshes (clj->js (mapv last pairs))}))
-
-(defn prediction [coord svms]
-  (let [pmap (atom {})
-        num-labels (.-length svms)]
-    (loop [i 0]
-      (let [entry (aget svms i)
-            group (aget entry 0)
-            svm (aget entry 1)
-            margin (.marginOne svm coord)]
-        (swap! pmap assoc group margin))
-      (when (< i (dec num-labels))
-        (recur (inc i))))
-    @pmap))
-
-(defn scale! [field-pt scale scene]
-  (let [min-diff (.-max_margin_min_diff field-pt)
-        mesh (.-mesh field-pt)]
-    (if (and min-diff scale
-             (number? scale)
-             (> scale 0))
-      (let [size (* scale (.sqrt js/Math min-diff))]
-        (.set (.-scale mesh) size size size)
-        (when (.-hiding mesh)
-          (.add scene mesh)
-          (set! (.-hiding mesh) false)))
-      ;; else make it disappear
-      (do
-        (when-not (.-hiding mesh)
-          (.remove scene mesh)
-          (set! (.-hiding mesh) true))))))
-
-(defn update-field!
-  "Update field colors and intensities"
-  [field svms classifier scale scene]
-  ;;(.log js/console "update field" scale)
-  (when scale
-    (doseq [field-pt field]
-      (let [p (prediction (.-co field-pt) svms)
-            max-margin (apply max (vals p))
-            margin-diffs (tools/map-map (fn [group margin]
-                                              (- max-margin margin)) p)
-            min-diff (apply min (vec (remove #(= % 0) (vals margin-diffs))))
-            max-margin-label (get (set/map-invert p) max-margin)
-            p-js (clj->js p)
-            new-material (node/get-unique-material (classifier max-margin-label))]
-        (set! (.-max_margin_min_diff field-pt) min-diff)
-        (scale! field-pt scale scene)
-        (set! (.-material (.-mesh field-pt)) new-material)
-        (set! (.-prediction field-pt) p-js)
-        (set! (.-max_margin_label field-pt) max-margin-label)))))
-
-(defn update-field-scale!
-  [field scale scene]
-  ;;(.log js/console "update field scale " field scale)
-  (when scale
-    (doseq [field-pt field]
-      (scale! field-pt scale scene))))
-
-
-      

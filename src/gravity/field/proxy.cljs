@@ -1,5 +1,6 @@
-(ns gravity.force.proxy
-  (:require [gravity.macros :refer-macros [log warn err]]))
+(ns gravity.field.proxy
+  (:require [gravity.macros :refer-macros [log warn err]]
+            [clairvoyant.core :as trace :include-macros true]))
 
 
 (defn send
